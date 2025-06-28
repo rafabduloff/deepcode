@@ -27,7 +27,19 @@ if not API_KEY:
     print("Error: OPENROUTER_API_KEY not found in .env file")
     sys.exit(1)
 
-client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=API_KEY)
+# Allow overriding the OpenRouter base URL and default model via environment variables
+BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+# Model variants
+POWER_MODEL = os.getenv("OPENROUTER_MODEL_POWER", "deepseek/deepseek-r1:free")
+FAST_MODEL  = os.getenv("OPENROUTER_MODEL_FAST", "deepseek/deepseek-chat-v3-0324:free")
+# Mode: power | fast | auto
+MODEL_MODE  = os.getenv("OPENROUTER_MODEL_MODE", "auto")
+
+# default
+MODEL_DEFAULT = POWER_MODEL if MODEL_MODE == "power" else FAST_MODEL if MODEL_MODE == "fast" else POWER_MODEL
+
+client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
 SYSTEM_PROMPT = (
     "You are an AI assistant that follows instructions precisely. "
@@ -104,6 +116,9 @@ GUI_KEYWORDS = [
     'import wx', 'import wxPython'
 ]
 
+CHAT_DIR = Path.home() / "ai" / "chats"
+CHAT_DIR.mkdir(parents=True, exist_ok=True)
+
 def load_config() -> Dict:
     """Load configuration from file."""
     try:
@@ -122,6 +137,7 @@ def load_config() -> Dict:
         'max_debug_iterations': 10,
         'auto_install': True,
         'use_venv': True,
+        'preferred_model': MODEL_DEFAULT,
     }
 
 def save_config(config: Dict) -> None:
@@ -292,11 +308,26 @@ def run_shell_command(cmd: str, auto_execute: bool = False) -> Optional[str]:
     
     return None
 
-def chat_completion(messages: List[Dict], model: str = "deepseek/deepseek-r1:free", max_tokens: int = 1024) -> Optional[str]:
+def chat_completion(messages: List[Dict], model: str = None, max_tokens: int = 1024) -> Optional[str]:
     """Make API call to OpenRouter with error handling."""
+    # pick model if not specified or model=="auto"
+    def _select_model(msgs: List[Dict]) -> str:
+        if MODEL_MODE == "fast":
+            return FAST_MODEL
+        if MODEL_MODE == "power":
+            return POWER_MODEL
+        # AUTO heuristic: long prompt or contains heavy keywords → power
+        last_user = " ".join(m["content"] for m in msgs if m.get("role") == "user")
+        heavy_kw = ["автокод", "workflow", "создай", "generate", "debug"]
+        if any(kw in last_user.lower() for kw in heavy_kw) or len(last_user) > 150:
+            return POWER_MODEL
+        return FAST_MODEL
+
+    chosen_model = model if model and model != "auto" else _select_model(messages)
+
     try:
         response = client.chat.completions.create(
-            model=model,
+            model=chosen_model,
             messages=messages,
             max_tokens=max_tokens,
             extra_headers={
@@ -967,6 +998,8 @@ Examples:
   python ai.py --auto-debug calculator.py
   python ai.py --interactive-debug main.py
   python ai.py --max-debug-iterations 10 --auto-debug app.py
+  python ai.py --chat
+  python ai.py                # то же, чат по умолчанию
         """
     )
     parser.add_argument("command", nargs="*", help='Query or files for init mode')
@@ -994,8 +1027,12 @@ Examples:
                        help="Set configuration option")
     parser.add_argument("--auto-execute", "-a", action="store_true",
                        help="Auto-execute safe commands without confirmation")
-    parser.add_argument("--model", "-m", default="deepseek/deepseek-r1:free",
-                       help="AI model to use")
+    parser.add_argument("--model", "-m", default="auto",
+                       help="AI model to use (fast, power, auto)")
+    parser.add_argument("--model-mode", choices=["fast", "power", "auto"],
+                       help="Persistently set default model mode")
+    parser.add_argument("--show-model", action="store_true",
+                       help="Show current model mode and selected model")
     parser.add_argument("--max-tokens", "-t", type=int, default=1024,
                        help="Maximum tokens in response")
     parser.add_argument("--verbose", "-v", action="store_true",
@@ -1006,6 +1043,8 @@ Examples:
                        help="Run automated coding + debugging workflow")
     parser.add_argument("--workflow-output", type=str, default="workflow_output.json",
                        help="Output file name for workflow report")
+    parser.add_argument("--chat", action="store_true",
+                       help="Start interactive chat REPL (default when no other arguments)")
 
     args = parser.parse_args()
     
@@ -1017,6 +1056,14 @@ Examples:
 
     config = load_config()
     
+    # Show current model info
+    if args.show_model:
+        print(f"Current mode : {MODEL_MODE}")
+        print(f"FAST  model  : {FAST_MODEL}")
+        print(f"POWER model  : {POWER_MODEL}")
+        print(f"Default used : {MODEL_DEFAULT}")
+        return
+
     # Handle configuration
     if args.config:
         key, value = args.config
@@ -1091,6 +1138,13 @@ Examples:
         auto_coding_debug_workflow(workflow_query, args.workflow_output, config, context)
         return
 
+    # --------------------------
+    # Chat mode (implicit or flag)
+    # --------------------------
+    if args.chat or not args.command:
+        chat_mode(context="")
+        return
+
     # Handle regular query
     if not args.command:
         print("Error: No command provided")
@@ -1120,7 +1174,7 @@ Examples:
         
         print("Sending request to AI...")
         
-        answer = chat_completion(messages, model=args.model, max_tokens=args.max_tokens)
+        answer = chat_completion(messages, model=args.model if args.model else None, max_tokens=args.max_tokens)
         if answer:
             print("\nAI Response:")
             print(answer)
@@ -1304,6 +1358,161 @@ def _install_missing_modules(stderr_text: str, python_exec: str | Path = sys.exe
         print(f"  📦 Отсутствует модуль {mod} — пытаюсь установить…")
         pip_cmd = f"{python_exec} -m pip install --quiet {mod}"
         run_shell_command(pip_cmd, auto_execute=auto_execute)
+
+# -----------------------------------------------------------
+# Chat REPL
+# -----------------------------------------------------------
+
+def _session_path(name: str) -> Path:
+    return CHAT_DIR / name
+
+def _save_chat_history(history: List[Dict[str, str]], fname: str | Path) -> None:
+    try:
+        with open(_session_path(str(fname)), 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[CHAT] Failed to save history: {e}")
+
+def _list_chats() -> List[Path]:
+    return sorted(CHAT_DIR.glob("*.json"))
+
+def _load_chat_history(fname: str | Path) -> List[Dict[str, str]]:
+    try:
+        with open(_session_path(str(fname)), 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        print("[CHAT] Cannot load session")
+        return []
+
+def _generate_chat_title(history: List[Dict[str, str]]) -> str:
+    prompt = [
+        {"role": "system", "content": "Придумай очень короткое (до 4 слов) название для этого диалога. Без кавычек."},
+    ] + history[-6:]  # последние сообщения
+    title = chat_completion(prompt, max_tokens=20) or "session"
+    return re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:50] or "session"
+
+def _print_recent(history: List[Dict[str, str]], limit: int = 15):
+    print("\n--- последние сообщения ---")
+    for msg in history[-limit:]:
+        if msg["role"] == "system":
+            continue
+        prefix = "Вы :" if msg["role"] == "user" else "ИИ :"
+        print(f"{prefix} {msg['content']}\n")
+    print("--------------------------\n")
+
+def chat_mode(context: str = "") -> None:
+    """Interactive chat REPL."""
+    print("Interactive chat mode. Type :help for commands, :exit to quit.")
+    history: List[Dict[str, str]] = []
+    session_file: Optional[Path] = None
+
+    system_msg = SYSTEM_PROMPT + (f"\n\nProject context:\n{context}" if context else "")
+    history.append({"role": "system", "content": system_msg})
+
+    while True:
+        try:
+            user_in = input("❯ ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n[CHAT] Bye!")
+            break
+
+        # Commands
+        if user_in.startswith(":"):
+            cmd, *args = user_in[1:].split(maxsplit=1)
+            arg = args[0] if args else ""
+            if cmd in {"exit", "quit", "q"}:
+                break
+            elif cmd == "reset":
+                history = [{"role": "system", "content": system_msg}]
+                print("[CHAT] Context reset.")
+            elif cmd == "list":
+                chats = _list_chats()
+                for idx, p in enumerate(chats, 1):
+                    print(f" {idx} - {p.stem}")
+            elif cmd == "open":
+                chats = _list_chats()
+                try:
+                    sel = int(arg) - 1
+                    session_file = chats[sel]
+                    history = _load_chat_history(session_file)
+                    print(f"[CHAT] Switched to {session_file.stem}")
+                    _print_recent(history)
+                except Exception:
+                    print("[CHAT] Invalid selection")
+            elif cmd == "save":
+                fname = arg or session_file.name if session_file else None
+                if not fname:
+                    fname = f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    session_file = _session_path(fname)
+                _save_chat_history(history, fname)
+                print(f"[CHAT] Saved to {fname}")
+            elif cmd == "load":
+                if arg:
+                    loaded = _load_chat_history(arg)
+                    if loaded:
+                        history = loaded
+                        _print_recent(history)
+                else:
+                    print("[CHAT] Usage: :load <file.json>")
+            elif cmd == "help":
+                print(":help        показать это сообщение")
+                print(":exit | :quit выйти")
+                print(":reset       сбросить контекст")
+                print(":list        список доступных сессий")
+                print(":open <idx>  переключиться на сессию")
+                print(":save <f>    сохранить историю")
+                print(":load <f>    загрузить историю")
+            else:
+                print(f"[CHAT] Unknown command :{cmd}")
+            continue
+
+        if not user_in:
+            continue
+
+        history.append({"role": "user", "content": user_in})
+        reply = chat_completion(history[-20:], max_tokens=1024)  # send last 20 msgs
+        if not reply:
+            print("[CHAT] Ошибка запроса к LLM")
+            history.pop()  # remove user msg to retry maybe
+            continue
+        print(reply)
+        history.append({"role": "assistant", "content": reply})
+
+        # Auto-save logic ----------------------------------------
+        if session_file is None:
+            # create draft on first exchange
+            session_file = _session_path(f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+
+        # After >=4 сообщений генерируем название и переименовываем
+        if len(history) >= 4 and session_file.stem.startswith("session_"):
+            title = _generate_chat_title(history)
+            new_path = _session_path(f"{title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            try:
+                session_file.rename(new_path)
+                session_file = new_path
+            except Exception:
+                pass
+
+        _save_chat_history(history, session_file)
+
+# -----------------------------------------------------------
+# Diff helpers
+# -----------------------------------------------------------
+
+def _looks_like_diff(text: str) -> bool:
+    return text.lstrip().startswith("--- ") and "+++ " in text
+
+def _apply_unified_diff(diff_text: str) -> List[str]:
+    try:
+        tmp = Path(tempfile.mkstemp(suffix=".patch")[1])
+        tmp.write_text(diff_text, encoding='utf-8')
+        subprocess.run(["patch", "-p0", "-i", str(tmp)], check=True)
+        tmp.unlink(missing_ok=True)
+        changed_files = re.findall(r"\n\*\*\*\s+(\S+)", diff_text)
+        return list(set(changed_files))
+    except Exception as e:
+        print(f"[PATCH] Failed to apply diff: {e}")
+        return []
 
 if __name__ == "__main__":
     try:
