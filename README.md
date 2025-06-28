@@ -19,27 +19,41 @@
 
 ```bash
 # Клонируйте репозиторий
-git clone <repo_url>
-cd scripts
+git clone https://github.com/rafabduloff/deepcode
+cd deepcode
 
-# Создайте .env с вашим ключом OpenRouter
-echo "OPENROUTER_API_KEY=<YOUR_KEY>" > .env
+# Создайте .env на основе шаблона (env.dev содержит все переменные)
+cp env.dev .env
+# затем вставьте ваш ключ OpenRouter
+vim .env   # или nano .env
 
-# Установите зависимости
-python -m pip install -r requirements.txt  # openai, python-dotenv и др.
+# Установите Python 3.11+ и зависимости
+python3.11 -m pip install -r requirements.txt
 ```
 
-> **Требования**: Python 3.9+, Linux/macOS/WSL. Для GUI-работы PyQt5, Tkinter или другие библиотеки устанавливаются автоматически.
+> **Требования**: Python **3.11** или новее, Linux/macOS/WSL.
+>
+> GUI-функции убраны — инструмент теперь ориентирован на консольные задачи.
+
+### Быстрый alias
+
+Чтобы не писать полный путь, добавьте в `~/.zshrc` или `~/.bashrc`:
+
+```bash
+alias ai="python ~/deepcode/askgpt.py"
+```
+
+Перезагрузите шелл (`source ~/.zshrc`) и используйте команду `ai` во всех примерах ниже.
 
 ## Быстрый старт
 
 ```bash
-# Сгенерировать простой пример и запустить
-python askgpt.py -c "Создай скрипт калькулятора"
+# Сгенерировать пример кода и запустить
+aі -c "Создай скрипт калькулятора"
 
 # Полный workflow с отчётом
-python askgpt.py -w --workflow-output report.json \
-  "Напиши игру крестики-нолики на PyQt5 и протестируй её"
+aі -w --workflow-output report.json \
+  "Напиши игру крестики-нолики и протестируй её"
 ```
 
 ## Ключевые флаги
