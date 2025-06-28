@@ -1,0 +1,68 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+
+# Logs and reports
+logs/
+*.log
+report_*.json
+workflow_output.json
+gui_workflow.json
+
+# IDE files
+.vscode/
+.idea/
+
+# Node / JS
+node_modules/
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated code backups
+*.backup*
+
+# Compiled binaries
+*.exe
+*.dll
+*.out
+*.class
+
+# Python coverage & test
+htmlcov/
+.coverage
+.coverage.*
+.cache/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+*.swp
+*.swo 
